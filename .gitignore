@@ -1,2 +1,3 @@
 venv/
 swim/agents/calibro/data/*.csv
+.env
