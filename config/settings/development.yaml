@@ -1,0 +1,8 @@
+# ERAY_HEIDELBERG/config/settings/development.yaml
+
+database:
+  host: "localhost"
+  port: 5432
+  dbname: "swim_db"
+  user: "futurediary"          # Your PostgreSQL user
+  password: ""                 # Your PostgreSQL password (empty if trusted)

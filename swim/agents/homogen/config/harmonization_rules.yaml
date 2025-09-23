@@ -1,0 +1,45 @@
+parameter_mappings:
+
+  # --- samples 2.csv (GEMStat water quality measurements) ---
+  'GEMS Station Number': 'station_id'
+  'Date': 'measurement_timestamp'
+  'Parameter': 'measurement_parameter'
+  'Value': 'measurement_value'
+  'Unit': 'measurement_unit'
+  'Fair': 'quality_flag'  # Optional: map qualitative flag if needed
+
+  # --- metadata.xlsx → Station_Metadata sheet ---
+  'GEMS Station Number': 'station_id'
+  'Latitude': 'latitude'
+  'Longitude': 'longitude'
+  'Country Name': 'country_code'
+  'Station Identifier': 'station_name'
+
+  # --- BWD_2023.xlsx → BWD_data_1990_2023 sheet ---
+  'countryCode': 'country_code'
+  'bathingWaterIdentifier': 'station_id'
+  'bathingWaterName': 'station_name'
+  'euNationalCode': 'eu_national_code'
+  'bathingWaterType': 'water_body_type'
+  'lat': 'latitude'
+  'lon': 'longitude'
+  'Waterbody': 'water_body_name'
+  'season': 'season_quality_status'
+  'monitoringCalendar': 'monitoring_calendar_status'
+  'management': 'management_status'
+  'bwProfile': 'bathing_water_profile_url'
+  'classificationDate': 'classification_date'
+  'assessmentYear': 'assessment_year'
+  'reportingYear': 'reporting_year'
+
+unit_conversions:
+  'mg/L': 'milligrams_per_liter'
+  'µg/L': 'micrograms_per_liter'
+  'ug/L': 'micrograms_per_liter'
+  'NTU': 'nephelometric_turbidity_units'
+  '°C': 'celsius'
+  'mgO2/l': 'milligrams_per_liter_oxygen'
+  'mmol/L': 'millimoles_per_liter'
+  'µS/cm': 'microsiemens_per_cm'
+  'mS/cm': 'millisiemens_per_cm'
+  '---': null  # For pH and similar

@@ -1,0 +1,26 @@
+# ERAY_HEIDELBERG/swim/agents/homogen/config/data_sources.yaml
+data_sources:
+  samples:
+    name: "GEMStat Water Quality Samples"
+    path: "data/raw/groundwater/samples_2.csv"
+    format: "csv"
+    encoding: "utf-8"
+    separator: ","
+
+  gemstat_metadata:
+    name: "GEMStat Station Metadata"
+    path: "data/raw/metadata/metadata.xlsx"
+    format: "xlsx"
+    sheet_name: "Station_Metadata"
+
+  bwd_metadata:
+    name: "EU Bathing Water Metadata"
+    path: "data/raw/metadata/BWD_2023.xlsx"
+    format: "xlsx"
+    sheet_name: "BWD_data_1990_2023"
+
+
+  lake_quality:
+    name: "Real Lake Quality Data"
+    path: "data/harmonized/lake_quality.parquet"
+    format: "parquet"
