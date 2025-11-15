@@ -1,3 +1,5 @@
+#swim/agents/calibro/langgraph_agent.py
+'''
 import os
 from dotenv import load_dotenv
 from typing import TypedDict, Optional, Annotated, List
@@ -174,5 +176,21 @@ Be helpful, concise, and technical when needed.""")
 # -----------------------------
 # 8. Entry Point
 # -----------------------------
+if __name__ == "__main__":
+    launch_chat()
+    
+
+'''
+
+# swim/agents/calibro/langgraph_agent.py
+"""
+Thin launcher for the CALIBRO LangGraph Agent.
+
+The actual LangGraph flow and tools are defined in:
+    swim/agents/calibro/calibro_agent_graph.py
+"""
+
+from swim.agents.calibro.calibro_agent_graph import launch_chat
+
 if __name__ == "__main__":
     launch_chat()

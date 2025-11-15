@@ -1,237 +1,30 @@
 # swim/agents/homogen/core_pipeline.py
-"""
-HOMOGEN Agent Core Pipeline - Updated to enrich `samples` with metadata for spatial information.
-"""
-"""
-import os
-import logging
+
 import json
+import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Any
-from dataclasses import dataclass
 from datetime import datetime
+from typing import List, Optional, Dict
+from dataclasses import dataclass
 
 import pandas as pd
 import numpy as np
-from shapely.geometry import Point
-
-from swim.shared.utils.config_loader import load_config
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-@dataclass
-class DataSource:
-    name: str
-    path: str
-    format: str
-    encoding: str = 'utf-8'
-    separator: str = ','
-    sheet_name: Optional[str] = None
-
-@dataclass
-class HarmonizationConfig:
-    target_crs: str = "EPSG:4326"
-    temporal_resolution: str = "daily"
-    quality_threshold: float = 0.8
-    output_format: str = "parquet"
-
-class HOMOGENPipeline:
-    def __init__(self, project_root: Path):
-        self.project_root = project_root
-        self.data_sources_config = self._load_data_sources_config()
-        self.harmonization_rules = self._load_harmonization_rules()
-        self.global_settings = self._load_global_settings()
-
-        # Load GEMSTAT metadata to enrich samples
-        gemstat_path = self.project_root / "data/harmonized/gemstat_metadata.parquet"
-        self.metadata_df = pd.read_parquet(gemstat_path) if gemstat_path.exists() else pd.DataFrame()
-
-        self.ingestor = DataIngestor(self.project_root)
-        self.parser = DataParser(self.harmonization_rules.get("parameter_mappings", {}), self.metadata_df)
-        self.harmonizer = DataHarmonizer(
-            harmonization_config=HarmonizationConfig(),
-            parameter_mappings=self.harmonization_rules.get("parameter_mappings", {}),
-            unit_conversions=self.harmonization_rules.get("unit_conversions", {})
-        )
-        self.validator = DataValidator()
-        self.data_sources = {name: DataSource(**details) for name, details in self.data_sources_config.get('data_sources', {}).items()}
-        self.harmonized_data = {}
-
-    def _load_data_sources_config(self) -> Dict:
-        path = self.project_root / "swim/agents/homogen/config/data_sources.yaml"
-        return load_config(str(path))
-
-    def _load_harmonization_rules(self) -> Dict:
-        path = self.project_root / "swim/agents/homogen/config/harmonization_rules.yaml"
-        return load_config(str(path))
-
-    def _load_global_settings(self) -> Dict:
-        path = self.project_root / "config/settings/development.yaml"
-        return load_config(str(path))
-
-    def run_pipeline(self, source_names: Optional[List[str]] = None):
-        if source_names is None:
-            source_names = list(self.data_sources.keys())
-        for source_name in source_names:
-            try:
-                logger.info(f"\n--- Processing Source: {source_name} ---")
-                source = self.data_sources[source_name]
-                raw = self.ingestor.ingest(source)
-                parsed = self.parser.parse(raw, source_name)
-                harmonized = self.harmonizer.harmonize(parsed, source_name)
-                validated = self.validator.validate(harmonized)
-                self.harmonized_data[source_name] = validated
-                self._save_harmonized_data(validated, source_name)
-            except Exception as e:
-                logger.error(f"Pipeline error in {source_name}: {e}", exc_info=True)
-        return self.harmonized_data
-
-    def _save_harmonized_data(self, df: pd.DataFrame, source_name: str):
-        out_dir = self.project_root / "data/harmonized"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(out_dir / f"{source_name}.parquet", engine="pyarrow", index=False)
-        metadata = {
-            "source_name": source_name,
-            "record_count": len(df),
-            "columns": list(df.columns),
-            "data_types": df.dtypes.astype(str).to_dict(),
-            "processing_timestamp": datetime.now().isoformat(),
-            "quality_stats": {
-                "avg_quality_score": float(df['quality_score'].mean()) if 'quality_score' in df.columns else None,
-                "records_with_flags": int((df['validation_flags'] != '').sum()) if 'validation_flags' in df.columns else 0
-            },
-        }
-        with open(out_dir / f"{source_name}_metadata.json", 'w') as f:
-            json.dump(metadata, f, indent=2)
-
-class DataIngestor:
-    def __init__(self, project_root):
-        self.project_root = project_root
-
-    def ingest(self, source: DataSource) -> pd.DataFrame:
-        path = self.project_root / source.path
-        if not path.exists(): raise FileNotFoundError(f"Not found: {path}")
-        if source.format.lower() == 'csv':
-            return pd.read_csv(path, encoding=source.encoding, sep=source.separator)
-        elif source.format.lower() in ['xlsx', 'xls']:
-            return pd.read_excel(path, sheet_name=source.sheet_name)
-        else:
-            raise ValueError(f"Unsupported format: {source.format}")
-
-class DataParser:
-    def __init__(self, field_mappings: Dict, metadata_df: pd.DataFrame):
-        self.field_mappings = field_mappings
-        self.metadata_df = metadata_df
-
-    def parse(self, df: pd.DataFrame, source_name: str) -> pd.DataFrame:
-        df = df.rename(columns={k: v for k, v in self.field_mappings.items() if k in df.columns})
-        if source_name == 'samples': return self._parse_groundwater(df)
-        if source_name == 'gemstat_metadata': return self._parse_metadata(df)
-        if source_name == 'bwd_metadata': return self._parse_metadata(df)
-        return df
-
-    def _parse_groundwater(self, df):
-        if 'station_id' in df.columns and not self.metadata_df.empty:
-            df = df.merge(self.metadata_df[['station_id', 'latitude', 'longitude']], on='station_id', how='left')
-        df['measurement_value'] = pd.to_numeric(df['measurement_value'].astype(str).str.replace(',', '.'), errors='coerce')
-        df['measurement_timestamp'] = pd.to_datetime(df['measurement_timestamp'], errors='coerce')
-        df['source_name'] = 'groundwater_quality'; df['data_type'] = 'in_situ'
-        df['geometry'] = df.apply(lambda r: Point(r['longitude'], r['latitude']).wkt if pd.notna(r['longitude']) and pd.notna(r['latitude']) else None, axis=1)
-        return df
-
-    def _parse_metadata(self, df):
-        df['latitude'] = pd.to_numeric(df.get('latitude', pd.Series()), errors='coerce')
-        df['longitude'] = pd.to_numeric(df.get('longitude', pd.Series()), errors='coerce')
-        df['geometry'] = df.apply(lambda r: Point(r['longitude'], r['latitude']).wkt if pd.notna(r['longitude']) and pd.notna(r['latitude']) else None, axis=1)
-        df['measurement_timestamp'] = pd.NaT
-        df['source_name'] = 'bathing_water_metadata'; df['data_type'] = 'tertiary'
-        return df
-
-class DataHarmonizer:
-    def __init__(self, harmonization_config, parameter_mappings, unit_conversions):
-        self.config = harmonization_config
-        self.parameter_mappings = parameter_mappings
-        self.unit_conversions = unit_conversions
-
-    def harmonize(self, df: pd.DataFrame, source_name: str) -> pd.DataFrame:
-        df = df.copy()
-        if 'measurement_unit' in df:
-            df['measurement_unit_standardized'] = df['measurement_unit'].map(self.unit_conversions).fillna(df['measurement_unit'])
-        df['harmonized_at'] = datetime.now()
-        df['harmonization_version'] = '1.0'
-        df['collection_date'] = df.get('measurement_timestamp', pd.NaT)
-
-        expected_cols = [
-            'station_name','station_id','municipality','latitude','longitude','geometry',
-            'measurement_parameter','measurement_value','measurement_unit','measurement_unit_standardized',
-            'quality_flag','source_name','data_type','collection_date',
-            'country_code','eu_national_code','water_body_type','water_body_name',
-            'season_quality_status','monitoring_calendar_status','management_status',
-            'bathing_water_profile_url','classification_date','assessment_year','reporting_year',
-            'harmonized_at','harmonization_version'
-        ]
-        for col in expected_cols:
-            if col not in df:
-                df[col] = pd.NaT if 'date' in col else None
-        return df[expected_cols]
-
-class DataValidator:
-    def validate(self, df: pd.DataFrame) -> pd.DataFrame:
-        df['quality_score'] = 1.0
-        df['validation_flags'] = ''
-        df = self._validate_required(df)
-        return df
-
-    def _validate_required(self, df):
-        for col in ['station_id', 'latitude', 'longitude', 'geometry']:
-            if col in df.columns:
-                missing = df[col].isna()
-                df.loc[missing, 'quality_score'] *= 0.6
-                df.loc[missing, 'validation_flags'] += f'MISSING_{col.upper()};'
-        return df
-
-if __name__ == '__main__':
-    project_root = Path(__file__).resolve().parents[3]
-    pipeline = HOMOGENPipeline(project_root)
-    pipeline.run_pipeline()
-    logger.info("\n✅ HOMOGEN pipeline finished. Check 'data/harmonized/' for output.")
-    
-    
-    
-        
-        """
-        
-        
-        
-        # Note: The above code is a complete implementation of the HOMOGEN agent core pipeline.
-        # It includes data ingestion, parsing, harmonization, validation, and saving the results.
-        # Make sure to adjust paths and configurations as needed for your specific environment. 
-        
-        
-        
-
- # swim/agents/homogen/core_pipeline.py
-
-import json
-import logging
-from pathlib import Path
-from datetime import datetime
-from typing import List, Optional
-from dataclasses import dataclass
-
-import pandas as pd
 
 from swim.shared.utils.config_loader import load_config
 from swim.agents.homogen.processing.parser import DataParser
 from swim.agents.homogen.processing.harmonizer import DataHarmonizer
+from swim.agents.homogen.processing.cleaner import DataCleaner
 from swim.agents.homogen.processing.validator import DataValidator
 from swim.agents.homogen.ingestion.csv_ingestor import load_csv
 from swim.agents.homogen.ingestion.excel_ingestor import load_excel
-from swim.agents.homogen.tools import compute_geo_bounds  # <--  Geo bounding box function
+from swim.agents.homogen.tools import compute_geo_bounds
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
+from swim.agents.homogen import setup_logging
+logger = setup_logging()
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(name)s | %(message)s'
+)
 
 @dataclass
 class DataSource:
@@ -246,89 +39,354 @@ class DataSource:
 class HarmonizationConfig:
     target_crs: str = "EPSG:4326"
     temporal_resolution: str = "daily"
-    quality_threshold: float = 0.8
+    quality_threshold: float = 0.7
     output_format: str = "parquet"
+    enable_cleaning: bool = True
+    enable_aggregation: bool = True
 
 class HOMOGENPipeline:
-    def __init__(self, project_root: Path):
+    """
+    Enhanced HOMOGEN Pipeline with complete harmonization workflow:
+    1. Data Ingestion (CSV/Excel)
+    2. Parsing & Schema Mapping
+    3. Canonicalization & Range Guards
+    4. Advanced Cleaning (Outliers, Seasonal, KNN Imputation)
+    5. Quality Scoring
+    6. Validation
+    7. Daily Aggregation
+    8. Output Generation
+    """
+    
+    def __init__(self, project_root: Path, config: Optional[HarmonizationConfig] = None):
         self.project_root = project_root
-        self.data_sources_config = load_config(project_root / "swim/agents/homogen/config/data_sources.yaml")
-        self.harmonization_rules = load_config(project_root / "swim/agents/homogen/config/harmonization_rules.yaml")
-        self.global_settings = load_config(project_root / "config/settings/development.yaml")
+        self.config = config or HarmonizationConfig()
+        
+        # Load configurations
+        self.data_sources_config = load_config(
+            project_root / "swim/agents/homogen/config/data_sources.yaml"
+        )
+        self.harmonization_rules = load_config(
+            project_root / "swim/agents/homogen/config/harmonization_rules.yaml"
+        )
+        self.global_settings = load_config(
+            project_root / "config/settings/development.yaml"
+        )
 
-        self.data_sources = {name: DataSource(**info) for name, info in self.data_sources_config["data_sources"].items()}
+        # Initialize data sources
+        self.data_sources = {
+            name: DataSource(**info) 
+            for name, info in self.data_sources_config["data_sources"].items()
+        }
+        
+        # Load metadata if available
         gemstat_meta_path = project_root / "data/harmonized/gemstat_metadata.parquet"
-        self.metadata_df = pd.read_parquet(gemstat_meta_path) if gemstat_meta_path.exists() else pd.DataFrame()
+        self.metadata_df = (
+            pd.read_parquet(gemstat_meta_path) 
+            if gemstat_meta_path.exists() 
+            else pd.DataFrame()
+        )
 
-        self.parser = DataParser(self.harmonization_rules.get("parameter_mappings", {}), self.metadata_df)
+        # Initialize processing components
+        self.parser = DataParser(
+            self.harmonization_rules.get("parameter_mappings", {}),
+            self.metadata_df
+        )
+        
         self.harmonizer = DataHarmonizer(
-            config=HarmonizationConfig(),
+            config=self.config,
             parameter_mappings=self.harmonization_rules.get("parameter_mappings", {}),
             unit_conversions=self.harmonization_rules.get("unit_conversions", {})
         )
+        
+        self.cleaner = DataCleaner(config={
+            'knn_neighbors': 5,
+            'seasonal_period': 365
+        })
+        
         self.validator = DataValidator()
+        
         self.harmonized_data = {}
+        self.processing_stats = {}
 
-    def run_pipeline(self, source_names: Optional[List[str]] = None):
-        if source_names is None:
-            source_names = list(self.data_sources.keys())
+def run_pipeline(self, source_names: Optional[List[str]] = None, 
+                 skip_cleaning: bool = False, skip_aggregation: bool = False) -> Dict[str, pd.DataFrame]:
+    """Execute harmonization pipeline with robust error handling."""
+    
+    if source_names is None:
+        source_names = list(self.data_sources.keys())
 
-        for source_name in source_names:
-            logger.info(f"\n--- Processing Source: {source_name} ---")
+    logger.info(f"\n{'='*80}")
+    logger.info(f"🌊 HOMOGEN Pipeline v2.0 - Processing {len(source_names)} sources")
+    logger.info(f"{'='*80}\n")
+
+    successful_sources = []
+    failed_sources = []
+
+    for source_name in source_names:
+        logger.info(f"\n{'─'*80}")
+        logger.info(f"📦 Processing: {source_name}")
+        logger.info(f"{'─'*80}")
+        
+        try:
+            # Validate source exists
+            if source_name not in self.data_sources:
+                raise ValueError(f"Unknown source: {source_name}")
+            
+            source = self.data_sources[source_name]
+            
+            # Step 1: Load with error handling
             try:
-                source = self.data_sources[source_name]
                 raw_df = self._load_data(source)
+                if raw_df.empty:
+                    raise ValueError(f"Empty dataset from {source_name}")
+                logger.info(f"  ✓ [LOAD] {len(raw_df)} raw records")
+            except FileNotFoundError as e:
+                logger.error(f"  ❌ File not found: {source.path}")
+                failed_sources.append((source_name, "file_not_found"))
+                continue
+            except Exception as e:
+                logger.error(f"  ❌ Load error: {e}")
+                failed_sources.append((source_name, "load_error"))
+                continue
+
+            # Step 2: Parse
+            try:
                 parsed_df = self.parser.parse(raw_df, source_name)
+                logger.info(f"  ✓ [PARSE] {len(parsed_df)} records")
+            except Exception as e:
+                logger.error(f"  ❌ Parse error: {e}")
+                failed_sources.append((source_name, "parse_error"))
+                continue
+
+            # Step 3: Harmonize
+            try:
                 harmonized_df = self.harmonizer.harmonize(parsed_df, source_name)
+                logger.info(f"  ✓ [HARMONIZE] {len(harmonized_df)} records")
+            except Exception as e:
+                logger.error(f"  ❌ Harmonization error: {e}")
+                failed_sources.append((source_name, "harmonization_error"))
+                continue
+
+            # Step 4: Clean (optional, with fallback)
+            if not skip_cleaning and self.config.enable_cleaning:
+                try:
+                    harmonized_df = self.cleaner.clean(harmonized_df)
+                    logger.info(f"  ✓ [CLEAN] {len(harmonized_df)} records")
+                except Exception as e:
+                    logger.warning(f"  ⚠️ Cleaning failed, continuing: {e}")
+                    # Continue without cleaning
+
+            # Step 5: Validate
+            try:
                 validated_df = self.validator.validate(harmonized_df)
-                self.harmonized_data[source_name] = validated_df
+                logger.info(f"  ✓ [VALIDATE] {len(validated_df)} records")
+            except Exception as e:
+                logger.error(f"  ❌ Validation error: {e}")
+                failed_sources.append((source_name, "validation_error"))
+                continue
+
+            # Step 6: Aggregate (optional)
+            if not skip_aggregation and self.config.enable_aggregation:
+                if 'measurement_timestamp' in validated_df.columns:
+                    try:
+                        validated_df = self.harmonizer.aggregate_daily(validated_df)
+                        logger.info(f"  ✓ [AGGREGATE] {len(validated_df)} daily records")
+                    except Exception as e:
+                        logger.warning(f"  ⚠️ Aggregation failed, using raw data: {e}")
+
+            # Store results
+            self.harmonized_data[source_name] = validated_df
+            successful_sources.append(source_name)
+            
+            # Save output
+            try:
                 self._save_output(validated_df, source_name)
             except Exception as e:
-                logger.error(f"❌ Pipeline error in {source_name}: {e}", exc_info=True)
+                logger.error(f"  ❌ Save error: {e}")
+                # Continue - data is still in memory
 
-        logger.info("\n✅ HOMOGEN pipeline finished. Check 'data/harmonized/' for output.")
-        return self.harmonized_data
+        except Exception as e:
+            logger.error(f"  ❌ Unexpected error: {e}", exc_info=True)
+            failed_sources.append((source_name, "unexpected_error"))
+
+    # Summary
+    logger.info(f"\n{'='*80}")
+    logger.info(f"✅ HOMOGEN Pipeline Complete")
+    logger.info(f"{'='*80}")
+    logger.info(f"  • Successful: {len(successful_sources)}/{len(source_names)}")
+    if failed_sources:
+        logger.warning(f"  • Failed sources:")
+        for name, reason in failed_sources:
+            logger.warning(f"    - {name}: {reason}")
+    logger.info(f"  • Total records: {sum(len(df) for df in self.harmonized_data.values())}")
+    logger.info(f"{'='*80}\n")
+    
+    return self.harmonized_data
+
 
     def _load_data(self, source: DataSource) -> pd.DataFrame:
+        """Load data from file based on format."""
         path = self.project_root / source.path
+        
         if not path.exists():
-            raise FileNotFoundError(f"Not found: {path}")
+            raise FileNotFoundError(f"Data file not found: {path}")
 
         if source.format.lower() == 'csv':
             return load_csv(path, encoding=source.encoding, separator=source.separator)
         elif source.format.lower() in ['xlsx', 'xls']:
             return load_excel(path, sheet_name=source.sheet_name)
         else:
-            raise ValueError(f"Unsupported format: {source.format}")
+            raise ValueError(f"Unsupported file format: {source.format}")
 
     def _save_output(self, df: pd.DataFrame, source_name: str):
+        """Save harmonized data and metadata."""
         out_dir = self.project_root / "data/harmonized"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # Save harmonized data
-        df.to_parquet(out_dir / f"{source_name}.parquet", engine="pyarrow", index=False)
+        if self.config.output_format == 'parquet':
+            output_path = out_dir / f"{source_name}.parquet"
+            df.to_parquet(output_path, engine="pyarrow", index=False)
+        else:
+            output_path = out_dir / f"{source_name}.csv"
+            df.to_csv(output_path, index=False)
+        
+        logger.info(f"  💾 Saved: {output_path.name}")
 
-        # ⛰️ Compute geo bounding box
+        # Compute metadata
         geo_bbox = compute_geo_bounds(df)
+        quality_stats = self._compute_quality_stats(df)
+        validation_summary = self.validator.get_validation_summary(df)
 
-        # Save metadata summary
         metadata = {
             "source_name": source_name,
             "record_count": len(df),
             "columns": list(df.columns),
-            "data_types": df.dtypes.astype(str).to_dict(),
             "processing_timestamp": datetime.now().isoformat(),
-            "geo_bbox": geo_bbox,  # ✅ spatial metadata
-            "quality_stats": {
-                "avg_quality_score": float(df['quality_score'].mean()) if 'quality_score' in df.columns else None,
-                "records_with_flags": int((df['validation_flags'] != '').sum()) if 'validation_flags' in df.columns else 0
-            },
+            "harmonization_version": "2.0",
+            "geo_bbox": geo_bbox,
+            "quality_stats": quality_stats,
+            "validation_summary": validation_summary,
+            "config": {
+                "target_crs": self.config.target_crs,
+                "temporal_resolution": self.config.temporal_resolution,
+                "cleaning_enabled": self.config.enable_cleaning,
+                "aggregation_enabled": self.config.enable_aggregation
+            }
         }
-        with open(out_dir / f"{source_name}_metadata.json", 'w') as f:
-            json.dump(metadata, f, indent=2)
 
-# ------------------ Entry Point ------------------ #
+        # Save metadata
+        metadata_path = out_dir / f"{source_name}_metadata.json"
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        logger.info(f"  📄 Saved: {metadata_path.name}")
+
+    def _compute_quality_stats(self, df: pd.DataFrame) -> dict:
+        """Compute comprehensive quality statistics."""
+        stats = {}
+        
+        if 'quality_score' in df.columns:
+            stats['avg_quality_score'] = float(df['quality_score'].mean())
+            stats['min_quality_score'] = float(df['quality_score'].min())
+            stats['max_quality_score'] = float(df['quality_score'].max())
+            stats['median_quality_score'] = float(df['quality_score'].median())
+            stats['quality_std'] = float(df['quality_score'].std())
+        
+        if 'data_completeness' in df.columns:
+            stats['avg_completeness'] = float(df['data_completeness'].mean())
+        
+        # Parameter availability
+        canonical_params = ['temp_c', 'ph', 'do_mg_l', 'turbidity_ntu', 'chl_ug_l',
+                           'water_level_m', 'discharge_m3s']
+        present_params = [p for p in canonical_params if p in df.columns]
+        stats['parameters_available'] = present_params
+        stats['parameter_coverage'] = len(present_params) / len(canonical_params)
+        
+        return stats
+
+    def get_summary(self) -> dict:
+        """Get pipeline execution summary."""
+        if not self.harmonized_data:
+            return {"status": "no_data", "message": "Pipeline has not been run yet"}
+        
+        summary = {
+            "status": "completed",
+            "pipeline_version": "2.0",
+            "sources_processed": len(self.harmonized_data),
+            "total_records": sum(len(df) for df in self.harmonized_data.values()),
+            "processing_stats": self.processing_stats,
+            "sources": {}
+        }
+        
+        for name, df in self.harmonized_data.items():
+            summary["sources"][name] = {
+                "records": len(df),
+                "avg_quality": float(df['quality_score'].mean()) if 'quality_score' in df.columns else None,
+                "avg_completeness": float(df['data_completeness'].mean()) if 'data_completeness' in df.columns else None,
+                "columns": len(df.columns)
+            }
+        
+        return summary
+
+    def export_cube(self, output_path: Optional[Path] = None) -> pd.DataFrame:
+        """
+        Export harmonized data as a unified data cube (long format).
+        
+        Structure: lake × time × parameter
+        """
+        if not self.harmonized_data:
+            raise ValueError("No harmonized data available. Run pipeline first.")
+        
+        # Combine all sources
+        all_data = pd.concat(
+            [df.assign(data_source=name) for name, df in self.harmonized_data.items()],
+            ignore_index=True
+        )
+        
+        # Convert to long format
+        id_cols = ['lake', 'station_id', 'measurement_timestamp', 'latitude', 
+                  'longitude', 'data_source', 'quality_score']
+        id_cols = [c for c in id_cols if c in all_data.columns]
+        
+        value_cols = ['temp_c', 'ph', 'do_mg_l', 'turbidity_ntu', 'chl_ug_l',
+                     'water_level_m', 'discharge_m3s']
+        value_cols = [c for c in value_cols if c in all_data.columns]
+        
+        cube = all_data.melt(
+            id_vars=id_cols,
+            value_vars=value_cols,
+            var_name='parameter',
+            value_name='value'
+        )
+        
+        # Remove null values
+        cube = cube.dropna(subset=['value'])
+        
+        if output_path:
+            cube.to_parquet(output_path, engine='pyarrow', index=False)
+            logger.info(f"📦 Exported data cube: {output_path}")
+        
+        return cube
+
+
 if __name__ == '__main__':
     project_root = Path(__file__).resolve().parents[3]
-    pipeline = HOMOGENPipeline(project_root)
-    pipeline.run_pipeline()
+    
+    config = HarmonizationConfig(
+        enable_cleaning=True,
+        enable_aggregation=True,
+        quality_threshold=0.7
+    )
+    
+    pipeline = HOMOGENPipeline(project_root, config)
+    results = pipeline.run_pipeline()
+    
+    # Print summary
+    summary = pipeline.get_summary()
+    print("\n📊 Pipeline Summary:")
+    print(json.dumps(summary, indent=2))
+    
+    # Export data cube
+    cube_path = project_root / "data/harmonized/unified_cube.parquet"
+    cube = pipeline.export_cube(cube_path)
+    print(f"\n📦 Exported unified cube: {len(cube)} records")
