@@ -124,10 +124,18 @@ def analyze_image_by_name(image_name: str) -> str:
                 output += f"  • ✅ CALIBRO satellite data available\n"
                 if calibro.get('chlorophyll_a_estimate'):
                     output += f"  • Chlorophyll-a (satellite): {calibro['chlorophyll_a_estimate']}\n"
+                if calibro.get('turbidity_estimate'):
+                    output += f"  • Turbidity (satellite): {calibro['turbidity_estimate']}\n"
+                if calibro.get('quality_score') is not None:
+                    output += f"  • Quality score: {calibro['quality_score']}\n"
+                if calibro.get('last_satellite_pass'):
+                    output += f"  • Last pass: {calibro['last_satellite_pass']}\n"
+            else:
+                output += f"  • ❌ CALIBRO satellite data unavailable\n"
             
             homogen = context.get('homogen_integration', {})
-            if homogen.get('nearest_sensor_km'):
-                output += f"  • 📍 Nearest HOMOGEN sensor: {homogen['nearest_sensor_km']} km\n"
+            if homogen.get('data_available'):
+                output += f"  • 📍 HOMOGEN datasets: {homogen.get('datasets', 0)}\n"
         
         output += f"\n*Analyzed at: {result['analyzed_at']}*"
         

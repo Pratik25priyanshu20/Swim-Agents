@@ -258,5 +258,9 @@ class AdvancedRiskAssessment:
         return frequencies.get(risk_level, "Weekly")
     
     
-    
+risk_assessor = AdvancedRiskAssessment()
+
+# Exported callable
+def assess_bloom_risk_comprehensive(**kwargs):
+    return risk_assessor.assess_bloom_risk(**kwargs)
     

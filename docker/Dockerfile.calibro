@@ -1,0 +1,14 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY swim/ swim/
+COPY data/ data/
+
+ENV PYTHONPATH=/app
+
+EXPOSE 10002
+CMD ["python", "-m", "swim.agents.calibro.a2a_server"]

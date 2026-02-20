@@ -495,26 +495,66 @@ The VISIOS agent will automatically analyze images and detect:
     def _get_contextual_data(self, gps_coords: Dict[str, float]) -> Dict[str, Any]:
         """
         Link with CALIBRO satellite data and HOMOGEN database.
-        Placeholder for production integration.
+        MVP integration uses local satellite CSVs when available.
         """
-        # In production, this queries actual CALIBRO outputs
+        calibro_data = self._get_calibro_data(gps_coords)
+        homogen_summary = self._get_homogen_summary()
+
+        calibro_available = calibro_data.get("status") == "success"
+        calibro_context = {
+            "satellite_data_available": calibro_available,
+            "last_satellite_pass": calibro_data.get("acquisition_date"),
+            "chlorophyll_a_estimate": (
+                f"{calibro_data.get('chlorophyll_a', 0.0):.2f} μg/L"
+                if calibro_available
+                else None
+            ),
+            "turbidity_estimate": (
+                f"{calibro_data.get('turbidity', 0.0):.2f}"
+                if calibro_available
+                else None
+            ),
+            "quality_score": calibro_data.get("quality_score"),
+            "source": calibro_data.get("source"),
+        }
+
         return {
             "location": {
                 "latitude": gps_coords["latitude"],
                 "longitude": gps_coords["longitude"],
                 "german_lake": self._identify_german_lake(gps_coords)
             },
-            "calibro_integration": {
-                "satellite_data_available": random.choice([True, False]),
-                "last_satellite_pass": (datetime.now() - timedelta(days=random.randint(1, 7))).isoformat(),
-                "chlorophyll_a_estimate": f"{random.uniform(5, 35):.1f} μg/L"
-            },
-            "homogen_integration": {
-                "nearest_sensor_km": round(random.uniform(0.5, 25.0), 1),
-                "recent_measurements": random.choice([True, False]),
-                "historical_blooms": random.randint(0, 5)
-            },
+            "calibro_integration": calibro_context,
+            "homogen_integration": homogen_summary,
             "integration_note": "✓ Linked with CALIBRO and HOMOGEN for validation"
+        }
+
+    def _get_calibro_data(self, gps_coords: Dict[str, float]) -> Dict[str, Any]:
+        """Fetch nearest satellite metrics via CALIBRO (best-effort)."""
+        try:
+            from swim.agents.calibro.calibro_core import CalibroAgent
+            calibro = CalibroAgent()
+            return calibro.get_water_quality_at_location(
+                lat=gps_coords["latitude"],
+                lon=gps_coords["longitude"],
+                date=None
+            )
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def _get_homogen_summary(self) -> Dict[str, Any]:
+        """Lightweight summary of HOMOGEN outputs."""
+        harmonized_dir = Path(__file__).resolve().parents[3] / "data" / "harmonized"
+        if not harmonized_dir.exists():
+            return {
+                "data_available": False,
+                "datasets": 0,
+            }
+
+        datasets = list(harmonized_dir.glob("*.parquet")) + list(harmonized_dir.glob("*.csv"))
+        return {
+            "data_available": bool(datasets),
+            "datasets": len(datasets),
         }
 
     def _identify_german_lake(self, coords: Dict[str, float]) -> str:

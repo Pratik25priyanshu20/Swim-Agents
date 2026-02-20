@@ -1,3 +1,69 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
 venv/
-swim/agents/calibro/data/*.csv
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
 .env
+
+# Data artifacts (keep raw + harmonized, ignore generated)
+data/intermediate/
+data/processed/predikt/
+data/processed/ml_ready_data.csv
+data/raw/lake_data/current_week/
+data/visios_images/
+
+# Outputs & models
+outputs/
+models/*.pkl
+models/*.h5
+*.log
+
+# Agent artifacts
+swim/agents/calibro/data/*.csv
+swim/agents/calibro/agent_memory.json
+
+# Research notebooks - large data & results (keep notebooks, ignore outputs)
+notebooks/research_package/data/
+notebooks/research_package/*.zip
+results_phase*/
+swim_research_*.zip
+
+# PhD application materials (private - do not push)
+docs/PHD_OUTREACH_GUIDE.md
+docs/RESEARCH_PLAN.md
+docs/RESEARCH_SUMMARY_1PAGE.md
+
+# Database files
+*.db
+
+# Large data files
+*.csv
+!data/harmonized/*.csv
+data/raw/**/*.csv
+notebooks/**/*.csv
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# Downloaded results
+/tmp/

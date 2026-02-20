@@ -1,9 +1,19 @@
-from langchain_google_genai import ChatGoogleGenerativeAI
+# tests/test_gee_access.py
 
-model = ChatGoogleGenerativeAI(
-    model="gemini-pro",  # Try the most common first
-    google_api_key="AIzaSyDDvr5ZXR7mo_2e773VB0PI_ujpqRS0pp4"
-)
+"""Smoke test for Google Generative AI connectivity."""
 
-response = model.invoke("Hello, who are you?")
-print(response.content)
+import os
+import pytest
+
+
+@pytest.mark.skipif(not os.getenv("GEMINI_API_KEY"), reason="GEMINI_API_KEY not set")
+def test_gemini_connectivity():
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    model = ChatGoogleGenerativeAI(
+        model="models/gemini-2.5-flash",
+        google_api_key=os.getenv("GEMINI_API_KEY"),
+    )
+    response = model.invoke("Hello, who are you?")
+    assert response.content
+    assert len(response.content) > 0

@@ -2,7 +2,7 @@
 
 import os
 from dotenv import load_dotenv
-from typing import List, TypedDict, Annotated, Optional
+from typing import List, TypedDict, Annotated
 
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -27,14 +27,16 @@ from swim.agents.homogen.tools import (
 # Load environment
 load_dotenv()
 
+
 # -----------------------------
 # Agent State Definition
 # -----------------------------
 class AgentState(TypedDict):
-    messages: Annotated[List[BaseMessage], add_messages]  # Must be BaseMessage list
+    messages: Annotated[List[BaseMessage], add_messages]
+
 
 # -----------------------------
-# Tool List
+# Tools
 # -----------------------------
 tools = [
     run_homogen_pipeline,
@@ -49,17 +51,19 @@ tools = [
     detect_outliers,
 ]
 
+
 # -----------------------------
-# Model Setup
+# Gemini Model Setup (FIXED)
 # -----------------------------
 chat_model = ChatGoogleGenerativeAI(
-    model="models/gemini-pro",
+    model="models/gemini-2.5-flash",
     temperature=0.4,
     google_api_key=os.getenv("GEMINI_API_KEY")
 ).bind_tools(tools)
 
+
 # -----------------------------
-# LangGraph Node Functions
+# Node Functions
 # -----------------------------
 def call_model(state: AgentState) -> AgentState:
     messages = state["messages"]
@@ -70,41 +74,55 @@ def call_model(state: AgentState) -> AgentState:
     response = chat_model.invoke(messages)
     return {"messages": messages + [response]}
 
+
 def should_continue(state: AgentState) -> str:
+    """Route to tools OR end."""
     last = state["messages"][-1]
     if hasattr(last, "tool_calls") and last.tool_calls:
         return "tools"
     return END
 
+
 def process_tool_results(state: AgentState) -> AgentState:
     return state
 
+
 # -----------------------------
-# LangGraph Workflow
+# Graph Construction
 # -----------------------------
 workflow = StateGraph(AgentState)
+
 workflow.add_node("agent", call_model)
 workflow.add_node("tools", ToolNode(tools))
 workflow.add_node("process", process_tool_results)
 
 workflow.set_entry_point("agent")
-workflow.add_conditional_edges("agent", should_continue, {
-    "tools": "tools",
-    "end": END
-})
+
+workflow.add_conditional_edges(
+    "agent",
+    should_continue,
+    {
+        "tools": "tools",
+        END: END      
+    }
+)
+
 workflow.add_edge("tools", "process")
 workflow.add_edge("process", "agent")
 
 app = workflow.compile()
 
+
 # -----------------------------
 # CLI Launcher
 # -----------------------------
 def launch_chat():
-    print("\033[1m\n🤖 HOMOGEN LangGraph Agent Activated!\033[0m")
-    print("💬 Ask anything about harmonized lake data or run the pipeline.\n(Type 'exit' to quit)\n")
+    print("\n🤖 HOMOGEN LangGraph Agent Activated!")
+    print("💬 Ask anything about harmonized lake data or run the pipeline.")
+    print("(Type 'exit' to quit)\n")
 
     state: AgentState = {"messages": []}
+
     while True:
         try:
             user_input = input("🧠 You > ")
@@ -112,26 +130,19 @@ def launch_chat():
                 print("👋 HOMOGEN shutting down.\n")
                 break
 
-            # Add HumanMessage
-            human_msg = HumanMessage(content=user_input)
-            state["messages"].append(human_msg)
+            msg = HumanMessage(content=user_input)
+            state["messages"].append(msg)
 
-            # Invoke LangGraph
             state = app.invoke(state)
 
-            # Display response
             response_msg = state["messages"][-1]
             if isinstance(response_msg, AIMessage):
                 print(f"\n🤖 HOMOGEN > {response_msg.content}\n")
 
         except Exception as e:
             print(f"❌ Error: {e}")
-            import traceback
-            traceback.print_exc()
             continue
 
-# -----------------------------
-# Entry Point
-# -----------------------------
+
 if __name__ == "__main__":
     launch_chat()

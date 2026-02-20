@@ -1,4 +1,4 @@
-# swim/agents/homogen/tools.py
+#swim/agents/homogen/tools.py
 
 from langchain.tools import tool
 import pandas as pd
@@ -6,358 +6,501 @@ import numpy as np
 from pathlib import Path
 import json
 import logging
+import traceback
 from datetime import datetime, timezone
 
+from swim.agents.homogen.utils.geo_utils import compute_geo_bounds 
+from swim.agents.homogen.core_pipeline import HOMOGENPipeline
 from swim.agents.homogen import setup_logging
+
 logger = setup_logging()
-
-# ========================
-# CANONICAL MAPPING & GUARDS
-# ========================
-CANON_MAP = {
-    "temperature": ("temp_c", float),
-    "WT": ("temp_c", float),
-    "ph": ("ph", float),
-    "PH": ("ph", float),
-    "dissolved_oxygen": ("do_mg_l", float),
-    "O2": ("do_mg_l", float),
-    "turbidity": ("turbidity_ntu", float),
-    "TRB": ("turbidity_ntu", float),
-    "water_level_cm": ("water_level_m", lambda v: float(v) / 100.0),
-    "W": ("water_level_m", lambda v: float(v) / 100.0),
-    "water_level_m_NHN": ("water_level_m_nhn", float),
-    "discharge_m3s": ("discharge_m3s", float),
-    "Q": ("discharge_m3s", float),
-    "chlorophyll_a": ("chl_ug_l", float),
-}
-
-RANGE_GUARDS = {
-    "temp_c": (-2.0, 40.0),
-    "ph": (6.0, 9.5),
-    "do_mg_l": (0.0, 20.0),
-    "turbidity_ntu": (0.0, 1000.0),
-    "water_level_m": (-50.0, 200.0),
-    "water_level_m_nhn": (-300.0, 1000.0),
-    "discharge_m3s": (0.0, 100000.0),
-    "chl_ug_l": (0.0, 1000.0),
-}
 
 # ========================
 # UTILITY FUNCTIONS
 # ========================
-def compute_geo_bounds(df: pd.DataFrame) -> dict:
-    """Compute bounding box (min/max lat/lon) for a dataset."""
-    if "latitude" not in df.columns or "longitude" not in df.columns:
-        return {}
-    return {
-        "min_latitude": float(df["latitude"].min()),
-        "max_latitude": float(df["latitude"].max()),
-        "min_longitude": float(df["longitude"].min()),
-        "max_longitude": float(df["longitude"].max()),
-        "bbox": f"[{df['latitude'].min()}, {df['longitude'].min()}, {df['latitude'].max()}, {df['longitude'].max()}]"
-    }
+def _get_project_root() -> Path:
+    """Get project root directory."""
+    return Path(__file__).resolve().parents[3]
 
-def mad_zscores(values):
-    """Compute Modified Z-scores using Median Absolute Deviation."""
-    x = [float(v) for v in values if isinstance(v, (int, float))]
-    if len(x) < 5:
-        return [0.0 for _ in values]
-    med = np.median(x)
-    mad = np.median(np.abs(np.array(x) - med)) or 1e-9
-    zscores = []
-    for v in values:
-        if isinstance(v, (int, float)):
-            zscores.append(0.6745 * (v - med) / mad)
-        else:
-            zscores.append(np.nan)
-    return zscores
 
-def apply_range_guards(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply range guards to canonical parameters."""
-    for param, (min_val, max_val) in RANGE_GUARDS.items():
-        if param in df.columns:
-            mask = (df[param] < min_val) | (df[param] > max_val)
-            if mask.any():
-                logger.warning(f"Removing {mask.sum()} out-of-range values for {param}")
-                df.loc[mask, param] = np.nan
-    return df
+def _get_harmonized_dir() -> Path:
+    """Get harmonized data directory."""
+    return _get_project_root() / "data/harmonized"
+
+
+def _safe_load_parquet(filepath: Path) -> tuple[pd.DataFrame, str]:
+    """Safely load parquet file with error handling."""
+    try:
+        if not filepath.exists():
+            return None, f"❌ File not found: {filepath.name}"
+        
+        df = pd.read_parquet(filepath)
+        if df.empty:
+            return None, f"⚠️ File is empty: {filepath.name}"
+        
+        return df, None
+    except Exception as e:
+        return None, f"❌ Error loading {filepath.name}: {str(e)}"
+
 
 # ========================
-# LANGGRAPH TOOLS
+# PIPELINE TOOLS
 # ========================
-
 @tool
 def run_homogen_pipeline(source_names: str = "") -> str:
     """
-    Execute the full HOMOGEN harmonization pipeline.
+    Run the HOMOGEN harmonization pipeline on specified data sources.
     
     Args:
-        source_names: Comma-separated list of source names (e.g., "samples,gemstat_metadata"). 
-                     Leave empty to process all sources.
+        source_names: Comma-separated list of source names, or empty for all sources
     
     Returns:
-        Status message with processing summary.
+        Pipeline execution summary with success/failure details
     """
     try:
-        from swim.agents.homogen.core_pipeline import HOMOGENPipeline
-        from pathlib import Path
-        
-        project_root = Path(__file__).resolve().parents[3]
+        project_root = _get_project_root()
         pipeline = HOMOGENPipeline(project_root)
-        
+
         sources = [s.strip() for s in source_names.split(",")] if source_names else None
+        
+        logger.info(f"Starting pipeline for sources: {sources or 'all'}")
         results = pipeline.run_pipeline(source_names=sources)
+
+        summary = pipeline.get_summary()
         
-        summary = f"✅ Pipeline completed. Processed {len(results)} sources:\n"
-        for name, df in results.items():
-            summary += f"  • {name}: {len(df)} records\n"
+        # Format response
+        response = "✅ HOMOGEN Pipeline Completed\n\n"
+        response += f"📊 **Summary:**\n"
+        response += f"  • Sources processed: {summary['sources_processed']}\n"
+        response += f"  • Total records: {summary['total_records']:,}\n"
+        response += f"  • Pipeline version: {summary['pipeline_version']}\n\n"
         
-        return summary
+        if summary['total_records'] == 0:
+            response += "⚠️ **Warning:** No records were successfully harmonized\n"
+            response += "💡 **Suggestion:** Check source data quality and availability\n"
+        else:
+            response += "**Source Details:**\n"
+            for name, info in summary['sources'].items():
+                avg_q = info.get('avg_quality')
+                quality_str = f"{avg_q:.2f}" if avg_q and not np.isnan(avg_q) else "N/A"
+                response += f"  • {name}: {info['records']:,} records (Quality: {quality_str})\n"
+        
+        return response
+
     except Exception as e:
-        logger.error(f"Pipeline execution failed: {e}", exc_info=True)
-        return f"❌ Pipeline failed: {str(e)}"
+        logger.error("Pipeline execution failed", exc_info=True)
+        return f"❌ Pipeline failed: {str(e)}\n💡 Check logs for details:\n{traceback.format_exc()[:500]}"
 
 
-@tool
-def load_csv(filepath: str) -> str:
-    """Load a CSV file and return the number of rows loaded."""
-    try:
-        df = pd.read_csv(filepath)
-        return f"✅ Loaded {len(df)} rows from {filepath}"
-    except Exception as e:
-        return f"❌ Error loading CSV: {str(e)}"
-
-
-@tool
-def show_columns(filepath: str) -> str:
-    """Display the column names of the given CSV file."""
-    try:
-        df = pd.read_csv(filepath)
-        return f"📋 Columns: {', '.join(df.columns.tolist())}"
-    except Exception as e:
-        return f"❌ Error reading columns: {str(e)}"
-
-
-@tool
-def validate_sample(filepath: str) -> str:
-    """Check and report missing values per column in a CSV."""
-    try:
-        df = pd.read_csv(filepath)
-        missing = df.isna().sum()
-        missing_pct = (missing / len(df) * 100).round(2)
-        
-        result = "🔍 Data Quality Report:\n"
-        for col in missing.index:
-            if missing[col] > 0:
-                result += f"  • {col}: {missing[col]} missing ({missing_pct[col]}%)\n"
-        
-        if missing.sum() == 0:
-            result = "✅ No missing values detected!"
-        
-        return result
-    except Exception as e:
-        return f"❌ Validation error: {str(e)}"
-
-
-@tool
-def compute_bbox(filepath: str) -> str:
-    """Compute the bounding box (min/max lat/lon) for a CSV dataset."""
-    try:
-        df = pd.read_csv(filepath)
-        if 'latitude' not in df.columns or 'longitude' not in df.columns:
-            return "❌ Dataset missing latitude/longitude columns."
-        
-        bbox = compute_geo_bounds(df)
-        return f"📍 Bounding Box:\n  Lat: [{bbox['min_latitude']:.4f}, {bbox['max_latitude']:.4f}]\n  Lon: [{bbox['min_longitude']:.4f}, {bbox['max_longitude']:.4f}]"
-    except Exception as e:
-        return f"❌ Error computing bbox: {str(e)}"
-
-
-@tool
-def summarize_harmonized_data(input: str = "") -> str:
-    """Summarize record count and quality score from harmonized metadata JSON files."""
-    try:
-        output_dir = Path(__file__).resolve().parents[3] / "data/harmonized"
-        if not output_dir.exists():
-            return "❌ Harmonized data directory not found. Run pipeline first."
-        
-        summaries = []
-        for file in output_dir.glob("*_metadata.json"):
-            with open(file) as f:
-                meta = json.load(f)
-                avg_quality = meta.get("quality_stats", {}).get("avg_quality_score")
-                summary = f"📦 {meta['source_name']}: {meta['record_count']} records"
-                if avg_quality is not None:
-                    summary += f", Quality: {avg_quality:.2f}"
-                summaries.append(summary)
-        
-        return "\n".join(summaries) if summaries else "ℹ️ No metadata files found."
-    except Exception as e:
-        return f"❌ Error reading metadata: {str(e)}"
-
-
+# ========================
+# DATA EXPLORATION TOOLS
+# ========================
 @tool
 def list_available_lakes(input: str = "") -> str:
-    """List all unique lake names available in the harmonized data."""
+    """
+    List all unique lake names in the harmonized dataset.
+    
+    Returns:
+        Formatted list of available lakes
+    """
     try:
-        path = Path(__file__).resolve().parents[3] / "data/harmonized/lake_samples.parquet"
-        if not path.exists():
-            return "❌ lake_samples.parquet not found. Run pipeline first."
+        filepath = _get_harmonized_dir() / "lake_samples.parquet"
+        df, error = _safe_load_parquet(filepath)
         
-        df = pd.read_parquet(path)
+        if error:
+            return f"{error}\n💡 Run the pipeline first: run_homogen_pipeline()"
+        
         if "lake" not in df.columns:
-            return "❌ 'lake' column missing in data."
+            return "❌ 'lake' column not found in data"
         
-        lakes = df["lake"].dropna().str.strip().str.title().unique().tolist()
-        if not lakes:
-            return "ℹ️ No lakes found in the dataset."
+        lakes = df["lake"].dropna().str.strip().str.title().unique()
+        if len(lakes) == 0:
+            return "⚠️ No lakes found in dataset"
         
-        return "🗺️ Available Lakes:\n" + "\n".join(f"  • {lake}" for lake in sorted(lakes))
+        response = f"🗺️ **Available Lakes ({len(lakes)}):**\n"
+        for i, lake in enumerate(sorted(lakes), 1):
+            response += f"  {i}. {lake}\n"
+        
+        return response
+        
     except Exception as e:
-        return f"❌ Error listing lakes: {str(e)}"
+        logger.error(f"Error listing lakes: {e}", exc_info=True)
+        return f"❌ Failed to list lakes: {str(e)}"
 
 
 @tool
 def get_lake_quality(lake_name: str, parameter: str = None, year: int = None) -> str:
     """
-    Returns water quality statistics for a given lake.
+    Get water quality statistics for a specific lake.
     
     Args:
         lake_name: Name of the lake (case-insensitive)
-        parameter: Optional specific parameter (e.g., 'turbidity', 'ph')
+        parameter: Optional specific parameter (e.g., 'temp_c', 'ph', 'turbidity_ntu')
         year: Optional year filter
     
     Returns:
-        Formatted statistics or error message
+        Formatted water quality statistics and interpretation
     """
     try:
-        path = Path(__file__).resolve().parents[3] / "data/harmonized/lake_samples.parquet"
-        if not path.exists():
-            return "❌ lake_samples.parquet not found."
+        filepath = _get_harmonized_dir() / "lake_samples.parquet"
+        df, error = _safe_load_parquet(filepath)
         
-        df = pd.read_parquet(path)
+        if error:
+            return error
+        
         if 'lake' not in df.columns:
-            return "❌ 'lake' column not found in data."
+            return "❌ 'lake' column not found"
         
-        # Filter by lake name
+        # Filter by lake
         match = df['lake'].dropna().str.lower().str.strip() == lake_name.lower().strip()
         filtered = df[match]
         
-        if year:
-            filtered = filtered[filtered.get('year', 0) == year]
-        
         if filtered.empty:
-            return f"❌ No data found for lake '{lake_name}'" + (f" in year {year}." if year else ".")
+            available = df['lake'].dropna().unique()[:5]
+            return (f"❌ No data for lake '{lake_name}'\n"
+                   f"💡 Try one of these: {', '.join(available)}")
         
-        # Standard numeric columns
-        numeric_cols = ['temperature', 'temp_c', 'turbidity', 'turbidity_ntu', 'ph', 
-                       'do_mg_l', 'chl_ug_l', 'quality_score']
+        # Apply year filter
+        if year and 'measurement_timestamp' in filtered.columns:
+            filtered['year'] = pd.to_datetime(filtered['measurement_timestamp']).dt.year
+            filtered = filtered[filtered['year'] == year]
+            if filtered.empty:
+                return f"❌ No data for {lake_name} in {year}"
         
+        # Define available parameters
+        params = {
+            'temp_c': 'Temperature (°C)',
+            'ph': 'pH',
+            'do_mg_l': 'Dissolved Oxygen (mg/L)',
+            'turbidity_ntu': 'Turbidity (NTU)',
+            'chl_ug_l': 'Chlorophyll-a (μg/L)',
+            'water_level_m': 'Water Level (m)'
+        }
+        
+        # Single parameter query
         if parameter:
-            param_lower = parameter.strip().lower()
-            matching_col = next((col for col in filtered.columns if col.lower() == param_lower), None)
+            param_col = parameter.lower().strip()
+            if param_col not in params:
+                return f"❌ Parameter '{parameter}' not found\n💡 Available: {', '.join(params.keys())}"
             
-            if not matching_col:
-                return f"❌ Parameter '{parameter}' not found. Available: {', '.join(numeric_cols)}"
+            if param_col not in filtered.columns or filtered[param_col].isna().all():
+                return f"⚠️ No {params[param_col]} data available for {lake_name}"
             
-            stats = filtered[matching_col].describe()
-            return (f"📊 {matching_col.replace('_', ' ').title()} at {lake_name.title()}" + 
-                   (f" (Year {year})" if year else "") + ":\n" +
-                   f"  Count: {int(stats['count'])}\n" +
-                   f"  Mean: {stats['mean']:.2f}\n" +
-                   f"  Min: {stats['min']:.2f}\n" +
-                   f"  Max: {stats['max']:.2f}\n" +
-                   f"  Std: {stats['std']:.2f}")
-        else:
-            result = f"📍 Water Quality Summary for {lake_name.title()}"
+            stats = filtered[param_col].describe()
+            
+            # Interpret results
+            response = f"📊 **{params[param_col]} at {lake_name.title()}**"
             if year:
-                result += f" (Year: {year})"
-            result += ":\n"
+                response += f" ({year})"
+            response += f"\n\n"
+            response += f"  • Count: {int(stats['count'])} measurements\n"
+            response += f"  • Mean: {stats['mean']:.2f}\n"
+            response += f"  • Range: {stats['min']:.2f} - {stats['max']:.2f}\n"
+            response += f"  • Std Dev: {stats['std']:.2f}\n\n"
             
-            for col in numeric_cols:
-                if col in filtered.columns and filtered[col].notna().any():
-                    stats = filtered[col].describe()
-                    result += (f"  • {col.replace('_', ' ').title()}: "
-                             f"Mean={stats['mean']:.2f}, Min={stats['min']:.2f}, Max={stats['max']:.2f}\n")
+            # Add interpretation
+            if param_col == 'temp_c':
+                if stats['mean'] > 25:
+                    response += "🔴 **Alert:** High temperature may stress aquatic life\n"
+                elif stats['mean'] < 10:
+                    response += "🔵 **Note:** Cold water temperatures\n"
+            elif param_col == 'ph':
+                if stats['mean'] < 6.5 or stats['mean'] > 8.5:
+                    response += "⚠️ **Alert:** pH outside optimal range (6.5-8.5)\n"
+            elif param_col == 'do_mg_l':
+                if stats['mean'] < 5:
+                    response += "🔴 **Alert:** Low dissolved oxygen - risk to aquatic life\n"
+            elif param_col == 'chl_ug_l':
+                if stats['mean'] > 30:
+                    response += "🟢 **Alert:** High chlorophyll - potential algal bloom\n"
             
-            return result.strip()
+            return response
+        
+        # Multi-parameter summary
+        response = f"🌊 **Water Quality Summary: {lake_name.title()}**"
+        if year:
+            response += f" ({year})"
+        response += f"\n\n"
+        response += f"📍 Total measurements: {len(filtered):,}\n\n"
+        
+        for param_col, param_name in params.items():
+            if param_col in filtered.columns and filtered[param_col].notna().any():
+                stats = filtered[param_col].describe()
+                response += f"**{param_name}:**\n"
+                response += f"  Mean: {stats['mean']:.2f}, Range: [{stats['min']:.2f}, {stats['max']:.2f}]\n\n"
+        
+        # Overall quality assessment
+        if 'quality_score' in filtered.columns:
+            avg_quality = filtered['quality_score'].mean()
+            response += f"**Data Quality Score:** {avg_quality:.2f}/1.00\n"
+            if avg_quality > 0.8:
+                response += "✅ High quality data\n"
+            elif avg_quality > 0.6:
+                response += "⚠️ Moderate quality data\n"
+            else:
+                response += "❌ Low quality data - use with caution\n"
+        
+        return response
+        
     except Exception as e:
         logger.error(f"Error in get_lake_quality: {e}", exc_info=True)
-        return f"❌ Error retrieving lake quality: {str(e)}"
+        return f"❌ Failed to retrieve lake quality: {str(e)}"
 
 
 @tool
 def get_habs_summary(lake_name: str) -> str:
     """
-    Summarizes Harmful Algal Bloom (HABs) indicators for a given lake.
+    Get Harmful Algal Bloom (HAB) indicators for a lake.
     
     Args:
-        lake_name: Name of the lake (case-insensitive)
+        lake_name: Name of the lake
     
     Returns:
-        HABs statistics including bloom probability, cyanobacteria density, toxin levels
+        HAB risk assessment and chlorophyll-a analysis
     """
     try:
-        path = Path(__file__).resolve().parents[3] / "data/harmonized/lake_samples.parquet"
-        if not path.exists():
-            return "❌ lake_samples.parquet not found."
+        filepath = _get_harmonized_dir() / "lake_samples.parquet"
+        df, error = _safe_load_parquet(filepath)
         
-        df = pd.read_parquet(path)
+        if error:
+            return error
+        
         filtered = df[df["lake"].dropna().str.lower().str.strip() == lake_name.lower().strip()]
         
         if filtered.empty:
-            return f"❌ No HABs data found for lake '{lake_name}'."
+            return f"❌ No data for lake '{lake_name}'"
         
-        indicators = ["bloom_probability", "cyanobacteria_density", "toxin_levels", "chl_ug_l"]
-        result = f"🦠 HABs Summary for {lake_name.title()}:\n"
+        response = f"🦠 **HAB Risk Assessment: {lake_name.title()}**\n\n"
         
-        for col in indicators:
+        # Chlorophyll-a analysis (primary HAB indicator)
+        if "chl_ug_l" in filtered.columns and filtered["chl_ug_l"].notna().any():
+            chl_stats = filtered["chl_ug_l"].describe()
+            chl_mean = chl_stats['mean']
+            chl_max = chl_stats['max']
+            
+            response += f"**Chlorophyll-a Levels:**\n"
+            response += f"  • Mean: {chl_mean:.2f} μg/L\n"
+            response += f"  • Max: {chl_max:.2f} μg/L\n"
+            response += f"  • Measurements: {int(chl_stats['count'])}\n\n"
+            
+            # WHO Guidelines interpretation
+            if chl_max > 100:
+                risk = "🔴 **CRITICAL**"
+                advice = "High risk of toxic blooms. Avoid water contact."
+            elif chl_max > 50:
+                risk = "🟠 **HIGH**"
+                advice = "Moderate bloom risk. Monitor closely."
+            elif chl_max > 30:
+                risk = "🟡 **MODERATE**"
+                advice = "Elevated levels. Watch for visible blooms."
+            elif chl_max > 10:
+                risk = "🟢 **LOW**"
+                advice = "Normal levels. No immediate concern."
+            else:
+                risk = "✅ **MINIMAL**"
+                advice = "Chlorophyll levels are safe."
+            
+            response += f"**HAB Risk Level:** {risk}\n"
+            response += f"💡 **Recommendation:** {advice}\n\n"
+        else:
+            response += "⚠️ No chlorophyll-a data available\n\n"
+        
+        # Additional indicators
+        indicators = {
+            "temp_c": ("Temperature", "°C"),
+            "ph": ("pH", ""),
+            "turbidity_ntu": ("Turbidity", "NTU")
+        }
+        
+        response += "**Supporting Indicators:**\n"
+        for col, (name, unit) in indicators.items():
             if col in filtered.columns and filtered[col].notna().any():
-                stats = filtered[col].describe()
-                result += (f"  • {col.replace('_', ' ').title()}: "
-                          f"Mean={stats['mean']:.2f}, Min={stats['min']:.2f}, Max={stats['max']:.2f}\n")
+                mean_val = filtered[col].mean()
+                response += f"  • {name}: {mean_val:.2f}{unit}\n"
         
-        if "bloom_status" in filtered.columns:
-            bloom_counts = filtered["bloom_status"].value_counts().to_dict()
-            result += f"  • Bloom Status: {bloom_counts}\n"
+        return response
         
-        return result.strip()
     except Exception as e:
-        return f"❌ Error retrieving HABs data: {str(e)}"
+        logger.error(f"Error in get_habs_summary: {e}", exc_info=True)
+        return f"❌ Failed to get HAB summary: {str(e)}"
+
+
+# ========================
+# DATA QUALITY TOOLS
+# ========================
+@tool
+def summarize_harmonized_data(input: str = "") -> str:
+    """
+    Summarize all harmonized datasets with metadata.
+    
+    Returns:
+        Summary of record counts, quality scores, and data sources
+    """
+    try:
+        output_dir = _get_harmonized_dir()
+        
+        if not output_dir.exists():
+            return "❌ Harmonized data directory not found\n💡 Run pipeline first"
+        
+        summaries = []
+        total_records = 0
+        
+        for file in output_dir.glob("*_metadata.json"):
+            try:
+                with open(file) as f:
+                    meta = json.load(f)
+                    
+                    records = meta.get('record_count', 0)
+                    total_records += records
+                    
+                    avg_quality = meta.get("quality_stats", {}).get("avg_quality_score")
+                    quality_str = f"{avg_quality:.2f}" if avg_quality else "N/A"
+                    
+                    summary = f"  • **{meta['source_name']}**: {records:,} records (Quality: {quality_str})"
+                    summaries.append(summary)
+            except Exception as e:
+                logger.warning(f"Failed to read {file.name}: {e}")
+        
+        if not summaries:
+            return "⚠️ No metadata files found\n💡 Run the pipeline to generate data"
+        
+        response = f"📦 **Harmonized Data Summary**\n\n"
+        response += f"Total Records: {total_records:,}\n"
+        response += f"Data Sources: {len(summaries)}\n\n"
+        response += "**Sources:**\n"
+        response += "\n".join(summaries)
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error summarizing data: {e}", exc_info=True)
+        return f"❌ Failed to summarize data: {str(e)}"
 
 
 @tool
 def detect_outliers(filepath: str, parameter: str) -> str:
     """
-    Detect outliers in a specific parameter using MAD-based robust Z-scores.
+    Detect statistical outliers in a water quality parameter.
     
     Args:
         filepath: Path to CSV file
         parameter: Column name to analyze
     
     Returns:
-        Summary of detected outliers
+        Outlier detection summary with statistics
     """
     try:
         df = pd.read_csv(filepath)
         
         if parameter not in df.columns:
-            return f"❌ Parameter '{parameter}' not found in dataset."
+            available = [c for c in df.columns if c in ['temp_c', 'ph', 'do_mg_l', 'turbidity_ntu', 'chl_ug_l']]
+            return f"❌ Parameter '{parameter}' not found\n💡 Try: {', '.join(available)}"
         
         values = df[parameter].dropna()
-        if len(values) < 5:
-            return f"⚠️ Insufficient data ({len(values)} values) for outlier detection."
         
-        z_scores = mad_zscores(values.tolist())
-        outlier_mask = np.abs(z_scores) > 5.0
-        n_outliers = np.sum(outlier_mask)
+        if len(values) < 5:
+            return f"⚠️ Insufficient data ({len(values)} values) for outlier detection"
+        
+        # MAD-based Z-scores
+        median = values.median()
+        mad = np.median(np.abs(values - median))
+        
+        if mad == 0:
+            return f"⚠️ Cannot detect outliers (MAD = 0)"
+        
+        z_scores = 0.6745 * (values - median) / mad
+        outliers = np.abs(z_scores) > 5.0
+        n_outliers = outliers.sum()
+        
+        response = f"🔍 **Outlier Detection: {parameter}**\n\n"
+        response += f"  • Total values: {len(values)}\n"
+        response += f"  • Median: {median:.2f}\n"
+        response += f"  • MAD: {mad:.2f}\n"
+        response += f"  • Outliers detected: {n_outliers} ({n_outliers/len(values)*100:.1f}%)\n\n"
         
         if n_outliers == 0:
-            return f"✅ No outliers detected in '{parameter}'"
+            response += "✅ No significant outliers detected"
+        else:
+            outlier_vals = values[outliers].values[:10]
+            response += f"**Outlier values (sample):**\n"
+            response += f"  {[round(v, 2) for v in outlier_vals]}\n\n"
+            response += "💡 **Suggestion:** Review these values for measurement errors"
         
-        outlier_values = values[outlier_mask].tolist()
-        return (f"⚠️ Detected {n_outliers} outliers in '{parameter}':\n"
-               f"  Values: {[round(v, 2) for v in outlier_values[:10]]}" + 
-               (" ..." if n_outliers > 10 else ""))
+        return response
+        
     except Exception as e:
+        logger.error(f"Outlier detection failed: {e}", exc_info=True)
         return f"❌ Outlier detection failed: {str(e)}"
+
+
+# ========================
+# FILE OPERATION TOOLS
+# ========================
+@tool
+def load_csv(filepath: str) -> str:
+    """Load and inspect a CSV file."""
+    try:
+        df = pd.read_csv(filepath)
+        return f"✅ Loaded {len(df):,} rows × {len(df.columns)} columns from {Path(filepath).name}"
+    except Exception as e:
+        return f"❌ Error loading CSV: {str(e)}"
+
+
+@tool
+def show_columns(filepath: str) -> str:
+    """Display column names and types from a CSV file."""
+    try:
+        df = pd.read_csv(filepath, nrows=5)
+        response = f"📋 **Columns in {Path(filepath).name}:**\n\n"
+        for col in df.columns:
+            dtype = df[col].dtype
+            response += f"  • {col} ({dtype})\n"
+        return response
+    except Exception as e:
+        return f"❌ Error reading columns: {str(e)}"
+
+
+@tool
+def validate_sample(filepath: str) -> str:
+    """Check data quality and missing values in a CSV."""
+    try:
+        df = pd.read_csv(filepath)
+        missing = df.isna().sum()
+        missing_pct = (missing / len(df) * 100).round(2)
+        
+        response = f"🔍 **Data Quality Report: {Path(filepath).name}**\n\n"
+        response += f"Total rows: {len(df):,}\n"
+        response += f"Total columns: {len(df.columns)}\n\n"
+        
+        if missing.sum() == 0:
+            response += "✅ No missing values detected!"
+        else:
+            response += "**Missing Values:**\n"
+            for col in missing.index:
+                if missing[col] > 0:
+                    response += f"  • {col}: {missing[col]} ({missing_pct[col]}%)\n"
+        
+        return response
+    except Exception as e:
+        return f"❌ Validation error: {str(e)}"
+
+
+@tool
+def compute_bbox(filepath: str) -> str:
+    """Compute geographic bounding box for a CSV dataset."""
+    try:
+        df = pd.read_csv(filepath)
+        
+        if 'latitude' not in df.columns or 'longitude' not in df.columns:
+            return "❌ Dataset missing latitude/longitude columns"
+        
+        bbox = compute_geo_bounds(df)
+        
+        response = "📍 **Geographic Bounding Box:**\n\n"
+        response += f"  • Latitude: [{bbox['min_latitude']:.4f}, {bbox['max_latitude']:.4f}]\n"
+        response += f"  • Longitude: [{bbox['min_longitude']:.4f}, {bbox['max_longitude']:.4f}]\n"
+        response += f"  • BBOX: {bbox['bbox']}\n"
+        
+        return response
+    except Exception as e:
+        return f"❌ Error computing bbox: {str(e)}"

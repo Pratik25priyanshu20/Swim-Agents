@@ -1,0 +1,40 @@
+{
+  "source_name": "lake_quality",
+  "record_count": 0,
+  "columns": [
+    "lake",
+    "station_id",
+    "date",
+    "temp_c",
+    "ph",
+    "do_mg_l",
+    "turbidity_ntu",
+    "chl_ug_l",
+    "water_level_m",
+    "discharge_m3s",
+    "quality_score",
+    "measurement_timestamp"
+  ],
+  "processing_timestamp": "2025-11-16T15:17:21.330258",
+  "geo_bbox": {
+    "error": "Latitude and Longitude columns not found."
+  },
+  "quality_stats": {
+    "avg_quality_score": NaN,
+    "min_quality_score": NaN,
+    "max_quality_score": NaN,
+    "median_quality_score": NaN,
+    "quality_std": NaN
+  },
+  "validation_summary": {
+    "null_timestamps": 0,
+    "null_temp_c": 0,
+    "null_ph": 0,
+    "null_do_mg_l": 0,
+    "null_turbidity_ntu": 0,
+    "null_chl_ug_l": 0,
+    "null_water_level_m": 0,
+    "null_discharge_m3s": 0
+  },
+  "harmonization_version": "2.0"
+}

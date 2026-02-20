@@ -1,139 +1,173 @@
 # swim/agents/homogen/processing/validator.py
 
-import logging
+
 import pandas as pd
 import numpy as np
-from typing import Dict, List
+from datetime import datetime, timezone
 
 from swim.agents.homogen import setup_logging
 logger = setup_logging()
 
+
 class DataValidator:
-    """Validates harmonized data against quality standards."""
-    
-    REQUIRED_FIELDS = [
-        'station_id', 'measurement_timestamp', 'latitude', 'longitude'
-    ]
-    
-    COORDINATE_BOUNDS = {
-        'latitude': (-90, 90),
-        'longitude': (-180, 180)
-    }
-    
+    """
+    Enhanced validator that handles both metadata and measurement data.
+    """
+
     def __init__(self):
-        self.validation_results = {}
-    
+        self.validation_summary = {}
+
     def validate(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Comprehensive validation pipeline:
-        1. Required fields check
-        2. Coordinate bounds validation
-        3. Temporal consistency check
-        4. Data completeness assessment
-        """
+        """Main validation entry point."""
         df = df.copy()
-        flags = []
-        
-        # 1. Required fields
-        missing_fields = [f for f in self.REQUIRED_FIELDS if f not in df.columns]
-        if missing_fields:
-            logger.warning(f"Missing required fields: {missing_fields}")
-            flags.append('missing_required_fields')
-        
-        # 2. Coordinate validation
-        df = self._validate_coordinates(df, flags)
-        
-        # 3. Temporal validation
-        df = self._validate_timestamps(df, flags)
-        
-        # 4. Completeness check
-        df = self._assess_completeness(df)
-        
-        # Add validation summary
-        df['validation_flags'] = ','.join(set(flags)) if flags else ''
-        df['validated_at'] = pd.Timestamp.now(tz='UTC').isoformat()
-        
-        logger.info(f"✅ Validation complete: {len(df)} records processed")
-        if flags:
-            logger.warning(f"⚠️  Validation flags: {', '.join(set(flags))}")
-        
+
+        # Detect data type
+        data_type = df.get('data_type', pd.Series(['unknown'])).iloc[0] if len(df) > 0 else 'unknown'
+        is_metadata = (data_type == 'metadata') or self._is_metadata_only(df)
+
+        if is_metadata:
+            logger.info("[Validator] Detected metadata source - skipping measurement validation")
+            df = self._validate_metadata(df)
+        else:
+            logger.info("[Validator] Validating measurement data")
+            df = self._validate_measurements(df)
+
+        # Store summary
+        self.validation_summary = {
+            "data_type": "metadata" if is_metadata else "measurement",
+            "remaining_rows": len(df),
+            "columns_present": list(df.columns),
+        }
+
         return df
-    
-    def _validate_coordinates(self, df: pd.DataFrame, flags: List[str]) -> pd.DataFrame:
-        """Ensure coordinates are within valid ranges."""
-        if 'latitude' in df.columns and 'longitude' in df.columns:
-            lat_min, lat_max = self.COORDINATE_BOUNDS['latitude']
-            lon_min, lon_max = self.COORDINATE_BOUNDS['longitude']
-            
-            invalid_coords = (
-                (df['latitude'] < lat_min) | (df['latitude'] > lat_max) |
-                (df['longitude'] < lon_min) | (df['longitude'] > lon_max)
-            )
-            
-            if invalid_coords.any():
-                count = invalid_coords.sum()
-                logger.warning(f"Found {count} records with invalid coordinates")
-                df.loc[invalid_coords, ['latitude', 'longitude']] = np.nan
-                flags.append('invalid_coordinates')
-        
-        return df
-    
-    def _validate_timestamps(self, df: pd.DataFrame, flags: List[str]) -> pd.DataFrame:
-        """Check temporal consistency."""
-        if 'measurement_timestamp' in df.columns:
-            # Ensure timestamps are datetime
-            df['measurement_timestamp'] = pd.to_datetime(
-                df['measurement_timestamp'], 
-                errors='coerce'
-            )
-            
-            # Flag future dates
-            now = pd.Timestamp.now(tz='UTC')
-            future_dates = df['measurement_timestamp'] > now
-            
-            if future_dates.any():
-                count = future_dates.sum()
-                logger.warning(f"Found {count} records with future timestamps")
-                df.loc[future_dates, 'measurement_timestamp'] = pd.NaT
-                flags.append('future_timestamps')
-            
-            # Flag very old dates (pre-1900)
-            old_dates = df['measurement_timestamp'] < pd.Timestamp('1900-01-01', tz='UTC')
-            if old_dates.any():
-                count = old_dates.sum()
-                logger.warning(f"Found {count} records with pre-1900 timestamps")
-                flags.append('suspicious_old_dates')
-        
-        return df
-    
-    def _assess_completeness(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate data completeness score."""
-        important_fields = [
-            'temp_c', 'ph', 'do_mg_l', 'turbidity_ntu', 'chl_ug_l',
-            'water_level_m', 'discharge_m3s'
+
+    def _is_metadata_only(self, df: pd.DataFrame) -> bool:
+        """Check if dataframe contains only metadata (no measurements)."""
+        measurement_cols = [
+            "temp_c", "ph", "do_mg_l", "turbidity_ntu",
+            "chl_ug_l", "water_level_m", "discharge_m3s"
         ]
         
-        present_fields = [f for f in important_fields if f in df.columns]
+        # Check if any measurement columns exist with data
+        has_measurements = any(
+            col in df.columns and df[col].notna().any() 
+            for col in measurement_cols
+        )
         
-        if present_fields:
-            completeness = df[present_fields].notna().mean(axis=1)
-            df['data_completeness'] = completeness.round(3)
+        return not has_measurements
+
+    def _validate_metadata(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Validate metadata sources (station info, locations)."""
+        # 1. Validate coordinates if present
+        if "latitude" in df.columns and "longitude" in df.columns:
+            invalid_coords = df["latitude"].isna() | df["longitude"].isna()
+            invalid_count = invalid_coords.sum()
+            
+            if invalid_count > 0:
+                logger.warning(f"[Validator] {invalid_count} records with invalid coordinates")
+        
+        # 2. Check for required metadata fields
+        required = ["station_id", "latitude", "longitude"]
+        missing = [col for col in required if col not in df.columns or df[col].isna().all()]
+        
+        if missing:
+            logger.warning(f"[Validator] Missing critical metadata: {missing}")
+        
+        logger.info(f"[Validator] Metadata validation complete: {len(df)} stations")
+        return df
+
+    def _validate_measurements(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Validate measurement data sources."""
+        numeric_cols = [
+            "temp_c", "ph", "do_mg_l", "turbidity_ntu",
+            "chl_ug_l", "water_level_m", "discharge_m3s"
+        ]
+
+        # 1. Timestamp validation
+        df = self._validate_timestamps(df)
+
+        # 2. Enforce numeric types
+        df = self._coerce_numeric(df, numeric_cols)
+
+        # 3. Drop empty measurements
+        df = self._drop_empty_measurements(df, numeric_cols)
+
+        # 4. Validate coordinate data if present
+        if "latitude" in df.columns and "longitude" in df.columns:
+            invalid_coords = df["latitude"].isna() | df["longitude"].isna()
+            if invalid_coords.any():
+                logger.info(f"[Validator] {invalid_coords.sum()} records without coordinates (keeping anyway)")
+
+        logger.info(f"[Validator] Measurement validation complete: {len(df)} records")
+        return df
+
+    def _validate_timestamps(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Validate and clean timestamps."""
+        if "measurement_timestamp" not in df.columns:
+            logger.warning("[Validator] No timestamp column found")
+            return df
+
+        # Convert to UTC
+        df["measurement_timestamp"] = pd.to_datetime(
+            df["measurement_timestamp"], errors="coerce", utc=True
+        )
+
+        now_utc = datetime.now(timezone.utc)
+
+        # Remove future timestamps
+        future_mask = df["measurement_timestamp"] > now_utc
+        future_count = future_mask.sum()
+
+        if future_count > 0:
+            logger.warning(f"[Validator] Removed {future_count} future timestamps")
+            df.loc[future_mask, "measurement_timestamp"] = pd.NaT
+
+        # Check validity rate
+        valid_count = df["measurement_timestamp"].notna().sum()
+        total_count = len(df)
+        
+        if valid_count == 0:
+            logger.error("[Validator] No valid timestamps found!")
+        elif valid_count < total_count * 0.5:
+            logger.warning(f"[Validator] Low timestamp validity: {valid_count}/{total_count}")
         else:
-            df['data_completeness'] = 0.0
+            logger.info(f"[Validator] {valid_count}/{total_count} valid timestamps")
+
+        return df
+
+    def _coerce_numeric(self, df: pd.DataFrame, numeric_cols) -> pd.DataFrame:
+        """Force numeric types for water quality parameters."""
+        for col in numeric_cols:
+            if col in df.columns:
+                # Convert to numeric, coercing errors to NaN
+                original_count = df[col].notna().sum()
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+                new_count = df[col].notna().sum()
+                
+                if original_count > new_count:
+                    logger.warning(f"[Validator] Coerced {original_count - new_count} non-numeric values in '{col}'")
         
         return df
-    
-    def get_validation_summary(self, df: pd.DataFrame) -> Dict:
-        """Generate validation summary statistics."""
-        summary = {
-            'total_records': len(df),
-            'records_with_flags': (df['validation_flags'] != '').sum() if 'validation_flags' in df.columns else 0,
-            'avg_completeness': df['data_completeness'].mean() if 'data_completeness' in df.columns else 0.0,
-            'avg_quality_score': df['quality_score'].mean() if 'quality_score' in df.columns else 0.0,
-        }
-        
-        if 'validation_flags' in df.columns:
-            flag_counts = df['validation_flags'].str.split(',').explode().value_counts()
-            summary['flag_breakdown'] = flag_counts.to_dict()
-        
-        return summary
+
+    def _drop_empty_measurements(self, df: pd.DataFrame, numeric_cols) -> pd.DataFrame:
+        """Remove rows with no valid measurements."""
+        valid_cols = [c for c in numeric_cols if c in df.columns]
+
+        if not valid_cols:
+            logger.warning("[Validator] No measurement columns found - keeping all rows")
+            return df
+
+        # Keep rows that have at least one valid measurement
+        has_data_mask = df[valid_cols].notna().any(axis=1)
+        removed = (~has_data_mask).sum()
+
+        if removed > 0:
+            logger.info(f"[Validator] Removed {removed} rows with no measurements")
+
+        return df[has_data_mask]
+
+    def get_validation_summary(self, df: pd.DataFrame = None) -> dict:
+        """Return validation summary for metadata output."""
+        if df is not None:
+            self.validation_summary["rows_after_validation"] = len(df)
+        return self.validation_summary

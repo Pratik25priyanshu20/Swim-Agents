@@ -1,0 +1,15 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY swim/ swim/
+COPY data/ data/
+COPY models/ models/
+
+ENV PYTHONPATH=/app
+
+EXPOSE 10004
+CMD ["python", "-m", "swim.agents.predikt.a2a_server"]

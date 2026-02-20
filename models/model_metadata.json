@@ -1,0 +1,44 @@
+{
+  "model_type": "sarima",
+  "feature_names": [
+    "turbidity",
+    "dissolved_oxygen",
+    "ph",
+    "total_nitrogen",
+    "total_phosphorus",
+    "solar_radiation",
+    "wind_speed"
+  ],
+  "metrics": {
+    "accuracy": 0.938334273359654,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1_score": 0.0,
+    "roc_auc": 0.9833586889327618,
+    "rmse": 0.20449914452689863,
+    "mae": 0.10519338503003792
+  },
+  "training_date": "2026-01-12T17:12:28.415954",
+  "training_time_seconds": 3.792725,
+  "n_samples": 53190,
+  "sequence_length": null,
+  "sarima_order": [
+    1,
+    0,
+    1
+  ],
+  "sarima_seasonal_order": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "bloom_threshold": 4.0,
+  "zero_as_missing_columns": [
+    "water_temperature",
+    "ph",
+    "dissolved_oxygen",
+    "precipitation"
+  ],
+  "zero_variance_eps": 1e-08
+}

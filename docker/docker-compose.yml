@@ -1,0 +1,99 @@
+version: "3.9"
+
+services:
+  homogen:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.homogen
+    ports:
+      - "10001:10001"
+    env_file:
+      - ../.env
+    volumes:
+      - ../data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:10001/.well-known/agent.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  calibro:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.calibro
+    ports:
+      - "10002:10002"
+    env_file:
+      - ../.env
+    volumes:
+      - ../data:/app/data
+    depends_on:
+      homogen:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:10002/.well-known/agent.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  visios:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.visios
+    ports:
+      - "10003:10003"
+    env_file:
+      - ../.env
+    volumes:
+      - ../data:/app/data
+    depends_on:
+      homogen:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:10003/.well-known/agent.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  predikt:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.predikt
+    ports:
+      - "10004:10004"
+    env_file:
+      - ../.env
+    volumes:
+      - ../data:/app/data
+      - ../models:/app/models
+    depends_on:
+      homogen:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:10004/.well-known/agent.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.orchestrator
+    ports:
+      - "10000:10000"
+    env_file:
+      - ../.env
+    depends_on:
+      homogen:
+        condition: service_started
+      calibro:
+        condition: service_started
+      visios:
+        condition: service_started
+      predikt:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:10000/.well-known/agent.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

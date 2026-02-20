@@ -3,7 +3,7 @@
 
 import os
 from dotenv import load_dotenv
-from typing import List, TypedDict, Annotated, Literal
+from typing import List, TypedDict, Annotated, Literal, Optional
 from pathlib import Path
 import time
 
@@ -96,7 +96,7 @@ Remember: Every image uploaded is a valuable data point. Treat each analysis wit
 # Language Model Initialization
 # ========================================
 chat_model = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
+    model="models/gemini-2.5-flash",
     temperature=0.3,
     google_api_key=os.getenv("GEMINI_API_KEY")
 )
@@ -214,9 +214,13 @@ class VisiosChat:
         }
         self.app = app
         self.session_start = time.time()
+        self.llm_enabled = bool(os.getenv("GEMINI_API_KEY")) and os.getenv("VISIOS_LLM_DISABLED") != "1"
     
     def send_message(self, user_input: str) -> str:
         """Send message and get response."""
+        if not self.llm_enabled:
+            return self._fallback_response(user_input)
+
         self.state["messages"].append(HumanMessage(content=user_input))
         
         try:
@@ -226,9 +230,36 @@ class VisiosChat:
             last_message = result["messages"][-1]
             return last_message.content
         except Exception as e:
-            error_response = f"⚠️ System error: {str(e)}. Please try again."
-            self.state["messages"].append(AIMessage(content=error_response))
-            return error_response
+            return self._fallback_response(user_input, error=str(e))
+
+    def _fallback_response(self, user_input: str, error: Optional[str] = None) -> str:
+        """Local fallback when LLM is unavailable."""
+        text = user_input.strip()
+        lowered = text.lower()
+        header = "⚠️ LLM unavailable, using local fallback.\n" if error else ""
+
+        if lowered in {"help", "?"}:
+            return header + (
+                "Try: 'list', 'analyze <filename>', 'summary', 'history', or 'report'."
+            )
+
+        if lowered in {"list", "show images"}:
+            return header + list_visios_images.invoke({})
+
+        if lowered.startswith("analyze "):
+            name = text[len("analyze "):].strip()
+            return header + analyze_image_by_name.invoke({"image_name": name})
+
+        if lowered in {"summary", "report"}:
+            return header + summarize_all_images.invoke({"detailed": "false"})
+
+        if lowered == "history":
+            return header + get_analysis_history.invoke({"limit": "10"})
+
+        if lowered == "status":
+            return header + generate_full_report.invoke({"format_type": "markdown"})
+
+        return header + "Try: 'list', 'analyze <filename>', 'summary', 'history', or 'report'."
     
     def get_stats(self) -> dict:
         """Get session statistics."""

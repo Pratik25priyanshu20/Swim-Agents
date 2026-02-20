@@ -1,0 +1,71 @@
+# SWIM Platform Configuration
+# ============================
+
+platform:
+  name: "SWIM"
+  version: "1.0.0"
+  description: "Surface Water Intelligence & Monitoring"
+
+llm:
+  provider: "google"
+  model: "models/gemini-2.5-flash"
+  temperature: 0.3
+  max_tokens: 2048
+  api_key_env: "GEMINI_API_KEY"
+
+agents:
+  homogen:
+    port: 10001
+    llm_temperature: 0.4
+  calibro:
+    port: 10002
+    llm_temperature: 0.4
+  visios:
+    port: 10003
+    llm_temperature: 0.3
+  predikt:
+    port: 10004
+    llm_temperature: 0.1
+    model_preference: "ensemble"  # lstm | sarima | ensemble | rule_based
+  orchestrator:
+    port: 10000
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  cors_origins: ["*"]
+  auth:
+    # Set SWIM_API_KEYS env var (comma-separated) and/or SWIM_JWT_SECRET
+    # When neither is set, auth is disabled (dev mode)
+    enabled_env: "SWIM_API_KEYS"
+    jwt_secret_env: "SWIM_JWT_SECRET"
+    jwt_ttl_seconds: 3600
+
+risk_fusion:
+  weights:
+    predikt: 0.4
+    calibro: 0.3
+    visios: 0.2
+    homogen: 0.1
+  thresholds:
+    low: 0.0
+    moderate: 0.3
+    high: 0.5
+    critical: 0.75
+
+retraining:
+  schedule: "weekly"
+  min_accuracy: 0.6
+  cv_folds: 5
+
+alerting:
+  enabled: false
+  smtp_host: ""
+  smtp_port: 587
+  from_email: ""
+  recipients: []
+  risk_threshold: "critical"  # Send alerts at this risk level or higher
+
+logging:
+  structured: true
+  level: "INFO"

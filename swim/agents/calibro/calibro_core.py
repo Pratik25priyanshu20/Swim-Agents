@@ -2,6 +2,9 @@
 
 import random
 from datetime import datetime
+from pathlib import Path
+from typing import Dict, Optional
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -78,4 +81,125 @@ class CalibroCore:
             "status": "completed",
             "accuracy": accuracy,
             "last_run": datetime.now().strftime('%H:%M')
+        }
+
+
+class CalibroAgent(CalibroCore):
+    """MVP satellite data adapter for CALIBRO."""
+
+    def __init__(self, data_dir: Optional[Path] = None):
+        super().__init__()
+        self.data_dir = data_dir or Path("data/raw/satellite")
+        self._satellite_cache: Optional[pd.DataFrame] = None
+
+    def _load_satellite_data(self) -> pd.DataFrame:
+        if self._satellite_cache is not None:
+            return self._satellite_cache
+
+        if not self.data_dir.exists():
+            self._satellite_cache = pd.DataFrame()
+            return self._satellite_cache
+
+        csv_files = list(self.data_dir.glob("*.csv"))
+        frames = []
+        use_cols = [
+            "acquisition_date",
+            "latitude",
+            "longitude",
+            "chlorophyll_index",
+            "turbidity_index",
+            "surface_temperature",
+            "cloud_coverage",
+            "quality_flag",
+            "lake_name",
+            "satellite_name",
+            "sensor_type",
+        ]
+
+        for path in csv_files:
+            try:
+                df = pd.read_csv(path, low_memory=False)
+                present = [c for c in use_cols if c in df.columns]
+                df = df[present].copy()
+                df["source_file"] = path.name
+                frames.append(df)
+            except Exception:
+                continue
+
+        if not frames:
+            self._satellite_cache = pd.DataFrame()
+            return self._satellite_cache
+
+        data = pd.concat(frames, ignore_index=True)
+        if "acquisition_date" in data.columns:
+            data["acquisition_date"] = pd.to_datetime(data["acquisition_date"], errors="coerce")
+        data = data.dropna(subset=["latitude", "longitude"])
+
+        self._satellite_cache = data
+        return self._satellite_cache
+
+    def get_water_quality_at_location(
+        self,
+        lat: float,
+        lon: float,
+        date: Optional[str] = None,
+        max_distance_km: float = 25.0,
+    ) -> Dict:
+        """Return satellite-derived metrics nearest to a location/date."""
+        df = self._load_satellite_data()
+        if df.empty:
+            return {"status": "error", "message": "No satellite data available"}
+
+        data = df
+        if date and "acquisition_date" in data.columns:
+            target_date = pd.to_datetime(date, errors="coerce")
+            if pd.notna(target_date):
+                date_deltas = (data["acquisition_date"] - target_date).abs()
+                data = data.assign(_date_delta=date_deltas)
+                data = data.sort_values("_date_delta")
+
+        # Haversine distance in km
+        lat_rad = np.radians(data["latitude"].astype(float))
+        lon_rad = np.radians(data["longitude"].astype(float))
+        lat0 = np.radians(lat)
+        lon0 = np.radians(lon)
+        dlat = lat_rad - lat0
+        dlon = lon_rad - lon0
+        a = np.sin(dlat / 2) ** 2 + np.cos(lat0) * np.cos(lat_rad) * np.sin(dlon / 2) ** 2
+        c = 2 * np.arcsin(np.sqrt(a))
+        earth_radius_km = 6371.0
+        distances = earth_radius_km * c
+        data = data.assign(_distance_km=distances)
+        data = data.sort_values(["_distance_km", "_date_delta"] if "_date_delta" in data.columns else ["_distance_km"])
+
+        nearest = data.iloc[0]
+        if nearest["_distance_km"] > max_distance_km:
+            return {
+                "status": "error",
+                "message": f"No satellite data within {max_distance_km} km",
+            }
+
+        cloud = float(nearest.get("cloud_coverage", 0.0) or 0.0)
+        quality_flag = int(nearest.get("quality_flag", 1) or 1)
+        quality_score = max(0.0, 1.0 - (cloud / 100.0)) * (1.0 if quality_flag == 1 else 0.7)
+
+        return {
+            "status": "success",
+            "source": nearest.get("source_file", "satellite"),
+            "satellite_name": nearest.get("satellite_name"),
+            "sensor_type": nearest.get("sensor_type"),
+            "acquisition_date": (
+                nearest.get("acquisition_date").isoformat()
+                if pd.notna(nearest.get("acquisition_date"))
+                else None
+            ),
+            "lake_name": nearest.get("lake_name"),
+            "latitude": float(nearest.get("latitude")),
+            "longitude": float(nearest.get("longitude")),
+            "chlorophyll_a": float(nearest.get("chlorophyll_index", 0.0) or 0.0),
+            "turbidity": float(nearest.get("turbidity_index", 0.0) or 0.0),
+            "surface_temperature": float(nearest.get("surface_temperature", 0.0) or 0.0),
+            "cloud_coverage": cloud,
+            "quality_score": round(quality_score, 3),
+            "distance_km": float(nearest["_distance_km"]),
         }

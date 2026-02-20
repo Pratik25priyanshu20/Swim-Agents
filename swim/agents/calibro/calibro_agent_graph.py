@@ -34,7 +34,7 @@ from swim.agents.calibro.enhanced_tools.bloom_risk import AdvancedRiskAssessment
 # Load Gemini API Key
 load_dotenv()
 chat_model = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
+    model="models/gemini-2.5-flash",
     google_api_key=os.getenv("GEMINI_API_KEY"),
     temperature=0.4,
 )

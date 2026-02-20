@@ -65,4 +65,9 @@ class AdvancedTrendAnalyzer:
         return "Stable"
     
     
+analyzer = AdvancedTrendAnalyzer()
+
+    
+def analyze_temporal_trends(**kwargs):
+    return analyzer.analyze_water_quality_trends(**kwargs)
     
